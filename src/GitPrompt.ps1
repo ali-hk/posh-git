@@ -96,6 +96,7 @@ $global:GitPromptSettings = [pscustomobject]@{
     EnableFileStatus                            = $true
     EnableFileStatusFromCache                   = $null
     RepositoriesInWhichToDisableFileStatus      = @( ) # Array of repository paths
+    StatusCacheHostName                         = 'localhost:5000'
     DescribeStyle                               = ''
 
     EnableWindowTitle                           = 'posh~git ~ '

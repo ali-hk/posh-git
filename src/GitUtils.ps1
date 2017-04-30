@@ -169,6 +169,34 @@ function GetUniquePaths($pathCollections) {
     $hash.Keys
 }
 
+function Get-GitStatusFromCache ($gitDir = (Get-GitDirectory)) {
+    try {
+        $hostName = $Global:GitPromptSettings.StatusCacheHostName
+        $response = Invoke-WebRequest -Uri "http://$hostName/api/status?repoPath=$gitDir" -UseBasicParsing
+        if ($response.StatusCode -ne 200) {
+            return $null
+        }
+
+        return $response.Content | ConvertFrom-Json
+    }
+    catch {
+        dbg 'Failed to retrieve status from cache'
+        return $null
+    }
+}
+
+function Set-GitStatusInCache ($newStatus, $gitDir = (Get-GitDirectory)) {
+    try {
+        $body = $newStatus | ConvertTo-Json
+        $hostName = $Global:GitPromptSettings.StatusCacheHostName
+        Invoke-RestMethod -Method Put -Uri "http://$hostname/api/status?repoPath=$gitDir" -ContentType "application/json" -Body $body 
+    }
+    catch {
+        dbg 'Failed to update status cache'
+    }
+    
+}
+
 $castStringSeq = [Linq.Enumerable].GetMethod("Cast").MakeGenericMethod([string])
 
 function Get-GitStatus($gitDir = (Get-GitDirectory)) {
@@ -198,38 +226,114 @@ function Get-GitStatus($gitDir = (Get-GitDirectory)) {
 
         if($settings.EnableFileStatus -and !$(InDotGitOrBareRepoDir $gitDir) -and !$(InDisabledRepository)) {
             if ($settings.EnableFileStatusFromCache -eq $null) {
-                $settings.EnableFileStatusFromCache = (Get-Module GitStatusCachePoshClient) -ne $null
+                # TODO: Initialize GitStatusCache web service instead
+                # $settings.EnableFileStatusFromCache = (Get-Module GitStatusCachePoshClient) -ne $null
             }
 
             if ($settings.EnableFileStatusFromCache) {
                 dbg 'Getting status from cache' $sw
                 $cacheResponse = Get-GitStatusFromCache
-                dbg 'Parsing status' $sw
 
-                $indexAdded.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexAdded))))
-                $indexModified.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexModified))))
-                foreach ($indexRenamed in $cacheResponse.IndexRenamed) {
-                    $indexModified.Add($indexRenamed.Old)
+                if($null -ne $cacheResponse)
+                { 
+                    dbg 'Parsing status from cache' $sw
+
+                    $indexAdded.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexAdded))))
+                    $indexModified.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexModified))))
+                    foreach ($indexRenamed in $cacheResponse.IndexRenamed) {
+                        $indexModified.Add($indexRenamed.Old)
+                    }
+                    $indexDeleted.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexDeleted))))
+                    $indexUnmerged.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexConflicted))))
+
+                    $filesAdded.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingAdded))))
+                    $filesModified.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingModified))))
+                    foreach ($workingRenamed in $cacheResponse.WorkingRenamed) {
+                        $filesModified.Add($workingRenamed.Old)
+                    }
+                    $filesDeleted.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingDeleted))))
+                    $filesUnmerged.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingConflicted))))
+
+                    $branch = $cacheResponse.Branch
+                    $upstream = $cacheResponse.Upstream
+                    $gone = $cacheResponse.UpstreamGone
+                    $aheadBy = $cacheResponse.AheadBy
+                    $behindBy = $cacheResponse.BehindBy
+
+                    if ($cacheResponse.Stashes) { $stashCount = $cacheResponse.Stashes.Length }
+                    if ($cacheResponse.State) { $branch += "|" + $cacheResponse.State }
                 }
-                $indexDeleted.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.IndexDeleted))))
-                $indexUnmerged.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.Conflicted))))
+                else {
+                    # Do the normal status and pass it to the cache
+                    dbg 'Getting fresh status' $sw
+                    $status = Invoke-Utf8ConsoleCommand { git -c core.quotepath=false -c color.status=false status --short --branch 2>$null }
+                    if($settings.EnableStashStatus) {
+                        dbg 'Getting stash count' $sw
+                        $stashCount = $null | git stash list 2>$null | measure-object | Select-Object -expand Count
+                    }
 
-                $filesAdded.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingAdded))))
-                $filesModified.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingModified))))
-                foreach ($workingRenamed in $cacheResponse.WorkingRenamed) {
-                    $filesModified.Add($workingRenamed.Old)
+                    dbg 'Parsing status' $sw
+                    switch -regex ($status) {
+                        '^(?<index>[^#])(?<working>.) (?<path1>.*?)(?: -> (?<path2>.*))?$' {
+                            if ($sw) { dbg "Status: $_" $sw }
+
+                            switch ($matches['index']) {
+                                'A' { $null = $indexAdded.Add($matches['path1']); break }
+                                'M' { $null = $indexModified.Add($matches['path1']); break }
+                                'R' { $null = $indexModified.Add($matches['path1']); break }
+                                'C' { $null = $indexModified.Add($matches['path1']); break } 
+                                'D' { $null = $indexDeleted.Add($matches['path1']); break }
+                                'U' { $null = $indexUnmerged.Add($matches['path1']); break }
+                            }
+                            switch ($matches['working']) {
+                                '?' { $null = $filesAdded.Add($matches['path1']); break }
+                                'A' { $null = $filesAdded.Add($matches['path1']); break }
+                                'M' { $null = $filesModified.Add($matches['path1']); break }
+                                'D' { $null = $filesDeleted.Add($matches['path1']); break }
+                                'U' { $null = $filesUnmerged.Add($matches['path1']); break }
+                            }
+                            continue
+                        }
+
+                        '^## (?<branch>\S+?)(?:\.\.\.(?<upstream>\S+))?(?: \[(?:ahead (?<ahead>\d+))?(?:, )?(?:behind (?<behind>\d+))?(?<gone>gone)?\])?$' {
+                            if ($sw) { dbg "Status: $_" $sw }
+
+                            $branch = $matches['branch']
+                            $upstream = $matches['upstream']
+                            $aheadBy = [int]$matches['ahead']
+                            $behindBy = [int]$matches['behind']
+                            $gone = [string]$matches['gone'] -eq 'gone'
+                            continue
+                        }
+
+                        '^## Initial commit on (?<branch>\S+)$' {
+                            if ($sw) { dbg "Status: $_" $sw }
+
+                            $branch = $matches['branch']
+                            continue
+                        }
+
+                        default { if ($sw) { dbg "Status: $_" $sw } }
+                    }
+
+                    
+                    $newStatus = New-Object psobject -Property @{ branch = $branch; 
+                        upstream = $upstream; 
+                        aheadBy = $aheadBy; 
+                        behindBy = $behindBy; 
+                        upstreamGone = $gone;
+                        stashCount = $stashCount; 
+                        indexAdded = $indexAdded; 
+                        indexModified = $indexModified;
+                        indexConflicted = $indexUnmerged; 
+                        indexDeleted = $indexDeleted;
+                        workingAdded = $filesAdded;
+                        workingModified = $filesModified; 
+                        workingDeleted = $filesDeleted;
+                        workingConflicted = $filesUnmerged 
+                    }
+                    Set-GitStatusInCache($newStatus)
                 }
-                $filesDeleted.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.WorkingDeleted))))
-                $filesUnmerged.AddRange($castStringSeq.Invoke($null, (,@($cacheResponse.Conflicted))))
-
-                $branch = $cacheResponse.Branch
-                $upstream = $cacheResponse.Upstream
-                $gone = $cacheResponse.UpstreamGone
-                $aheadBy = $cacheResponse.AheadBy
-                $behindBy = $cacheResponse.BehindBy
-
-                if ($cacheResponse.Stashes) { $stashCount = $cacheResponse.Stashes.Length }
-                if ($cacheResponse.State) { $branch += "|" + $cacheResponse.State }
             } else {
                 dbg 'Getting status' $sw
                 $status = Invoke-Utf8ConsoleCommand { git -c core.quotepath=false -c color.status=false status --short --branch 2>$null }
@@ -292,19 +396,37 @@ function Get-GitStatus($gitDir = (Get-GitDirectory)) {
         # This collection is used twice, so create the array just once
         $filesAdded = $filesAdded.ToArray()
 
-        $indexPaths = @(GetUniquePaths $indexAdded,$indexModified,$indexDeleted,$indexUnmerged)
-        $workingPaths = @(GetUniquePaths $filesAdded,$filesModified,$filesDeleted,$filesUnmerged)
-        $index = (,$indexPaths) |
-            Add-Member -PassThru NoteProperty Added    $indexAdded.ToArray() |
-            Add-Member -PassThru NoteProperty Modified $indexModified.ToArray() |
-            Add-Member -PassThru NoteProperty Deleted  $indexDeleted.ToArray() |
-            Add-Member -PassThru NoteProperty Unmerged $indexUnmerged.ToArray()
+        #$indexPaths = @(GetUniquePaths $indexAdded,$indexModified,$indexDeleted,$indexUnmerged)
+        #$workingPaths = @(GetUniquePaths $filesAdded,$filesModified,$filesDeleted,$filesUnmerged)
 
-        $working = (,$workingPaths) |
-            Add-Member -PassThru NoteProperty Added    $filesAdded |
-            Add-Member -PassThru NoteProperty Modified $filesModified.ToArray() |
-            Add-Member -PassThru NoteProperty Deleted  $filesDeleted.ToArray() |
-            Add-Member -PassThru NoteProperty Unmerged $filesUnmerged.ToArray()
+        $index = New-Object psobject -Property @{
+            Added = $indexAdded.ToArray()
+            Modified = $indexModified.ToArray()
+            Deleted = $indexDeleted.ToArray()
+            Unmerged = $indexUnmerged.ToArray()
+        }
+
+        #$index = (,$indexPaths) |
+        #    Add-Member -PassThru NoteProperty Added    $indexAdded.ToArray() |
+        #    Add-Member -PassThru NoteProperty Modified $indexModified.ToArray() |
+        #    Add-Member -PassThru NoteProperty Deleted  $indexDeleted.ToArray() |
+        #    Add-Member -PassThru NoteProperty Unmerged $indexUnmerged.ToArray()
+
+        $working = New-Object psobject -Property @{
+            Added = $filesAdded
+            Modified = $filesModified.ToArray()
+            Deleted = $filesDeleted.ToArray()
+            Unmerged = $filesUnmerged.ToArray()
+        }
+
+        # $working = (,$workingPaths) |
+        #    Add-Member -PassThru NoteProperty Added    $filesAdded |
+        #    Add-Member -PassThru NoteProperty Modified $filesModified.ToArray() |
+        #    Add-Member -PassThru NoteProperty Deleted  $filesDeleted.ToArray() |
+        #    Add-Member -PassThru NoteProperty Unmerged $filesUnmerged.ToArray()
+
+        $hasIndex = ($indexAdded.Count -gt 0) -or ($indexModified.Count -gt 0) -or ($indexDeleted.Count -gt 0) -or ($indexUnmerged.Count -gt 0)
+        $hasWorking = ($filesAdded.Count -gt 0) -or ($filesModified.Count -gt 0) -or ($filesDeleted.Count -gt 0) -or ($filesUnmerged.Count -gt 0)
 
         $result = New-Object PSObject -Property @{
             GitDir          = $gitDir
@@ -313,9 +435,9 @@ function Get-GitStatus($gitDir = (Get-GitDirectory)) {
             BehindBy        = $behindBy
             UpstreamGone    = $gone
             Upstream        = $upstream
-            HasIndex        = [bool]$index
+            HasIndex        = [bool]$hasIndex
             Index           = $index
-            HasWorking      = [bool]$working
+            HasWorking      = [bool]$hasWorking
             Working         = $working
             HasUntracked    = [bool]$filesAdded
             StashCount      = $stashCount
