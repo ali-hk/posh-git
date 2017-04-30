@@ -61,6 +61,34 @@ filter quoteStringWithSpecialChars {
     }
 }
 
+function script:makeRelative($absPath)
+{
+    # Note: Resolve-Path -Relative is not sufficient, as it can't handle deleted files
+    $currPath = Join-Path ((Get-Location).Path) ([System.IO.Path]::DirectorySeparatorChar)
+    $currUri = [System.Uri]$currPath
+    $absUri = [System.Uri]$absPath
+    if($currUri.Scheme -ne $absUri.Scheme)
+    {
+        # Path can't be made relative
+        return $absPath
+    }
+
+    $relativeUri = $currUri.MakeRelativeUri($absUri);
+    $relativePath = [System.Uri]::UnescapeDataString($relativeUri.ToString());
+
+    if ($absUri.Scheme -ieq "file")
+    {
+       $relativePath = $relativePath.Replace([System.IO.Path]::AltDirectorySeparatorChar, [System.IO.Path]::DirectorySeparatorChar);
+    }
+
+    return $relativePath;
+} 
+
+function script:getPathsRelativeToGitRoot($files)
+{
+    return $files | % { makeRelative (Join-Path (Join-Path (Get-GitDirectory) ("..\")) ($_)) }
+}
+
 function script:gitCommands($filter, $includeAliases) {
     $cmdList = @()
     if (-not $global:GitTabSettings.AllCommands) {
@@ -154,15 +182,31 @@ function script:gitFiles($filter, $files) {
 }
 
 function script:gitIndex($GitStatus, $filter) {
-    gitFiles $filter $GitStatus.Index
+    $addedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Added
+    $modifiedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Modified
+    $deletedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Deleted
+    $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Unmerged
+
+    $indexRelative = (@($addedRelative) + @($modifiedRelative) + @($deletedRelative) + @($unmergedRelative))
+    gitFiles $filter $indexRelative
 }
 
 function script:gitAddFiles($GitStatus, $filter) {
-    gitFiles $filter (@($GitStatus.Working.Unmerged) + @($GitStatus.Working.Modified) + @($GitStatus.Working.Added))
+    $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Unmerged
+    $modifiedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Modified
+    $addedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Added
+    $deletedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Deleted
+
+    gitFiles $filter (@($unmergedRelative) + @($modifiedRelative) + @($addedRelative) + @($deletedRelative))
 }
 
 function script:gitCheckoutFiles($GitStatus, $filter) {
-    gitFiles $filter (@($GitStatus.Working.Unmerged) + @($GitStatus.Working.Modified) + @($GitStatus.Working.Deleted))
+    $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Unmerged
+    $modifiedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Modified
+    $addedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Added
+    $deletedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Deleted
+
+    gitFiles $filter (@($unmergedRelative) + @($modifiedRelative) + @($addedRelative) + @($deletedRelative))
 }
 
 function script:gitDiffFiles($GitStatus, $filter, $staged) {
@@ -170,16 +214,22 @@ function script:gitDiffFiles($GitStatus, $filter, $staged) {
         gitFiles $filter $GitStatus.Index.Modified
     }
     else {
-        gitFiles $filter (@($GitStatus.Working.Unmerged) + @($GitStatus.Working.Modified) + @($GitStatus.Index.Modified))
+        $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Unmerged
+        $modifiedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Modified
+        $indexModifiedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Modified
+
+        gitFiles $filter (@($unmergedRelative) + @($modifiedRelative) + @($indexModifiedRelative))
     }
 }
 
 function script:gitMergeFiles($GitStatus, $filter) {
-    gitFiles $filter $GitStatus.Working.Unmerged
+    $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Unmerged
+    gitFiles $filter $unmergedRelative
 }
 
 function script:gitDeleted($GitStatus, $filter) {
-    gitFiles $filter $GitStatus.Working.Deleted
+    $deletedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Deleted
+    gitFiles $filter $deletedRelative
 }
 
 function script:gitAliases($filter) {

@@ -266,7 +266,7 @@ function Get-GitStatus($gitDir = (Get-GitDirectory)) {
                 else {
                     # Do the normal status and pass it to the cache
                     dbg 'Getting fresh status' $sw
-                    $status = Invoke-Utf8ConsoleCommand { git -c core.quotepath=false -c color.status=false status --short --branch 2>$null }
+                    $status = Invoke-Utf8ConsoleCommand { git -c core.quotepath=false -c color.status=false -c status.relativePaths=false status --short --branch 2>$null }
                     if($settings.EnableStashStatus) {
                         dbg 'Getting stash count' $sw
                         $stashCount = $null | git stash list 2>$null | measure-object | Select-Object -expand Count
@@ -316,7 +316,7 @@ function Get-GitStatus($gitDir = (Get-GitDirectory)) {
                         default { if ($sw) { dbg "Status: $_" $sw } }
                     }
 
-                    
+
                     $newStatus = New-Object psobject -Property @{ branch = $branch; 
                         upstream = $upstream; 
                         aheadBy = $aheadBy; 
