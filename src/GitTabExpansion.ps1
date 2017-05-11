@@ -211,7 +211,9 @@ function script:gitCheckoutFiles($GitStatus, $filter) {
 
 function script:gitDiffFiles($GitStatus, $filter, $staged) {
     if ($staged) {
-        gitFiles $filter $GitStatus.Index.Modified
+        $indexModifiedRelative = getPathsRelativeToGitRoot $GitStatus.Index.Modified
+
+        gitFiles $filter $indexModifiedRelative
     }
     else {
         $unmergedRelative = getPathsRelativeToGitRoot $GitStatus.Working.Unmerged
